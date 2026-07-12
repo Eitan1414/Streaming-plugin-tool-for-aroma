@@ -29,7 +29,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
 
       - name: Vérifier et décompresser le ZIP
         id: source
@@ -39,15 +38,17 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $zipFile = if ($env:SOURCE_ZIP) {
-            $env:SOURCE_ZIP
+          if ($env:SOURCE_ZIP) {
+            $zipFile = $env:SOURCE_ZIP
           }
           else {
-            "WiiUStream-PC-Client-v0.5.0-480p-turbo.zip"
+            $zipFile = "WiiUStream-PC-Client-v0.5.0-480p-turbo.zip"
           }
 
+          Write-Host "ZIP demandé : $zipFile"
+
           if (-not (Test-Path -LiteralPath $zipFile)) {
-            Write-Host "ZIP disponibles :"
+            Write-Host "ZIP disponibles dans le dépôt :"
 
             Get-ChildItem `
               -Path . `
@@ -80,6 +81,14 @@ jobs:
             -DestinationPath $extractDir `
             -Force
 
+          Write-Host "Contenu décompressé :"
+
+          Get-ChildItem `
+            -Path $extractDir `
+            -File `
+            -Recurse |
+            Select-Object -ExpandProperty FullName
+
           $projects = @(
             Get-ChildItem `
               -Path $extractDir `
@@ -89,34 +98,37 @@ jobs:
             Where-Object {
               $root = $_.Directory.FullName
 
+              $requirementsBuild = Join-Path `
+                $root `
+                "requirements-build.txt"
+
+              $protocolFile = Join-Path `
+                $root `
+                "wiiu_stream\protocol.py"
+
               $hasRequirements = Test-Path `
-                -LiteralPath (
-                  Join-Path `
-                    $root `
-                    "requirements-build.txt"
-                )
+                -LiteralPath $requirementsBuild
 
               $hasProtocol = Test-Path `
-                -LiteralPath (
-                  Join-Path `
-                    $root `
-                    "wiiu_stream\protocol.py"
-                )
+                -LiteralPath $protocolFile
 
               return ($hasRequirements -and $hasProtocol)
             }
           )
 
-          if ($projects.Count -ne 1) {
-            Write-Host "Fichiers trouvés après extraction :"
+          if ($projects.Count -eq 0) {
+            throw "Aucun projet PC valide n’a été trouvé dans le ZIP."
+          }
 
-            Get-ChildItem `
-              -Path $extractDir `
-              -File `
-              -Recurse |
-              Select-Object -ExpandProperty FullName
+          if ($projects.Count -gt 1) {
+            Write-Host "Plusieurs projets ont été détectés :"
 
-            throw "Impossible d’identifier un unique projet PC."
+            $projects |
+              ForEach-Object {
+                Write-Host " - $($_.Directory.FullName)"
+              }
+
+            throw "Impossible de choisir automatiquement le projet."
           }
 
           $projectDir = $projects[0].Directory.FullName
@@ -129,10 +141,37 @@ jobs:
 
           Write-Host "Projet détecté : $projectDir"
 
+      - name: Vérifier les fichiers du projet
+        working-directory: ${{ steps.source.outputs.project_dir }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $requiredFiles = @(
+            "main.py",
+            "requirements-build.txt",
+            "wiiu_stream\protocol.py",
+            "assets\wiiustream.ico"
+          )
+
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path -LiteralPath $file)) {
+              throw "Fichier requis absent : $file"
+            }
+          }
+
+          Get-ChildItem `
+            -Path . `
+            -File `
+            -Recurse |
+            Select-Object -ExpandProperty FullName
+
       - name: Installer les dépendances
         working-directory: ${{ steps.source.outputs.project_dir }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           python -m pip install --upgrade pip
           python -m pip install -r requirements-build.txt
 
@@ -140,29 +179,45 @@ jobs:
         working-directory: ${{ steps.source.outputs.project_dir }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           python -m unittest discover -s tests -v
 
       - name: Compiler l’exécutable Windows
         working-directory: ${{ steps.source.outputs.project_dir }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           python -m PyInstaller `
             --noconfirm `
             --clean `
             --onefile `
             --windowed `
             --name WiiUStream-PC-480p-Turbo `
-            --icon assets/wiiustream.ico `
+            --icon assets\wiiustream.ico `
             --hidden-import PIL._tkinter_finder `
             main.py
 
-      - name: Préparer l’artifact
+      - name: Vérifier l’exécutable
         working-directory: ${{ steps.source.outputs.project_dir }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           $exe = "dist\WiiUStream-PC-480p-Turbo.exe"
 
           if (-not (Test-Path -LiteralPath $exe)) {
+            Write-Host "Contenu du dossier dist :"
+
+            if (Test-Path -LiteralPath "dist") {
+              Get-ChildItem `
+                -Path "dist" `
+                -File `
+                -Recurse |
+                Select-Object -ExpandProperty FullName
+            }
+
             throw "L’exécutable n’a pas été produit."
           }
 
@@ -177,7 +232,9 @@ jobs:
               -Encoding ascii `
               "dist\WiiUStream-PC-480p-Turbo.exe.sha256"
 
-          Get-ChildItem dist
+          Get-ChildItem `
+            -Path dist `
+            -File
 
       - name: Mettre le client PC en téléchargement
         uses: actions/upload-artifact@v4
